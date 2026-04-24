@@ -1,0 +1,5 @@
+- This workspace is a local-first knowledge canvas built with Vite, React, React Flow, react-pdf, and localforage.
+- Keep the app usable offline after the first dependency install and prefer browser storage over server APIs.
+- PDF blobs live in IndexedDB and node/edge graph data stays serializable for export and import.
+- Preserve the intentional earthy visual style in src/index.css instead of reverting to default Vite styles.
+- Prefer focused edits in src/App.tsx, src/nodes, src/storage.ts, and src/index.css when extending the canvas.

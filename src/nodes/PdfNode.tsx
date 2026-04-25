@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 
 import { useCanvasContext } from '../canvas-context'
 import type { PdfCanvasNode } from '../types'
+import { useImeSafeField } from '../use-ime-safe-field'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -13,6 +14,10 @@ function PdfNode({ id, data, selected }: NodeProps<PdfCanvasNode>) {
   const { getPdfFile, removeNode, updatePdfNode } = useCanvasContext()
   const file = getPdfFile(data.fileId)
   const isCollapsed = data.collapsed ?? false
+  const titleField = useImeSafeField(data.title, (nextValue) => updatePdfNode(id, { title: nextValue }))
+  const summaryField = useImeSafeField(data.summary, (nextValue) =>
+    updatePdfNode(id, { summary: nextValue }),
+  )
 
   return (
     <article
@@ -44,9 +49,12 @@ function PdfNode({ id, data, selected }: NodeProps<PdfCanvasNode>) {
 
       <input
         className="brain-node__title nodrag"
-        value={data.title}
+        value={titleField.value}
         placeholder="PDF 标题"
-        onChange={(event) => updatePdfNode(id, { title: event.target.value })}
+        onChange={titleField.onChange}
+        onCompositionStart={titleField.onCompositionStart}
+        onCompositionEnd={titleField.onCompositionEnd}
+        onBlur={titleField.onBlur}
       />
 
       {isCollapsed ? null : (
@@ -72,9 +80,12 @@ function PdfNode({ id, data, selected }: NodeProps<PdfCanvasNode>) {
 
           <textarea
             className="brain-node__body brain-node__body--compact nodrag"
-            value={data.summary}
+            value={summaryField.value}
             placeholder="在这里写摘要、启发、争议点和后续行动。"
-            onChange={(event) => updatePdfNode(id, { summary: event.target.value })}
+            onChange={summaryField.onChange}
+            onCompositionStart={summaryField.onCompositionStart}
+            onCompositionEnd={summaryField.onCompositionEnd}
+            onBlur={summaryField.onBlur}
           />
         </>
       )}

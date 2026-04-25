@@ -2,10 +2,15 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 
 import { useCanvasContext } from '../canvas-context'
 import type { NoteCanvasNode } from '../types'
+import { useImeSafeField } from '../use-ime-safe-field'
 
 function NoteNode({ id, data, selected }: NodeProps<NoteCanvasNode>) {
   const { removeNode, updateNoteNode } = useCanvasContext()
   const isCollapsed = data.collapsed ?? false
+  const titleField = useImeSafeField(data.title, (nextValue) => updateNoteNode(id, { title: nextValue }))
+  const contentField = useImeSafeField(data.content, (nextValue) =>
+    updateNoteNode(id, { content: nextValue }),
+  )
 
   return (
     <article
@@ -37,17 +42,23 @@ function NoteNode({ id, data, selected }: NodeProps<NoteCanvasNode>) {
 
       <input
         className="brain-node__title nodrag"
-        value={data.title}
+        value={titleField.value}
         placeholder="节点标题"
-        onChange={(event) => updateNoteNode(id, { title: event.target.value })}
+        onChange={titleField.onChange}
+        onCompositionStart={titleField.onCompositionStart}
+        onCompositionEnd={titleField.onCompositionEnd}
+        onBlur={titleField.onBlur}
       />
 
       {isCollapsed ? null : (
         <textarea
           className="brain-node__body nodrag"
-          value={data.content}
+          value={contentField.value}
           placeholder="写下你的理解、推导、反驳点或下一步实验。"
-          onChange={(event) => updateNoteNode(id, { content: event.target.value })}
+          onChange={contentField.onChange}
+          onCompositionStart={contentField.onCompositionStart}
+          onCompositionEnd={contentField.onCompositionEnd}
+          onBlur={contentField.onBlur}
         />
       )}
 

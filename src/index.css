@@ -490,6 +490,30 @@ button {
   overflow: hidden;
 }
 
+.brain-node__pdf--clickable {
+  cursor: zoom-in;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    background-color 180ms ease;
+}
+
+.brain-node__pdf--clickable:hover,
+.brain-node__pdf--clickable:focus-visible {
+  background: rgba(255, 252, 247, 0.96);
+  box-shadow:
+    inset 0 0 0 1px rgba(47, 107, 89, 0.32),
+    0 10px 22px rgba(91, 74, 47, 0.08);
+}
+
+.brain-node__pdf--clickable:hover {
+  transform: translateY(-1px);
+}
+
+.brain-node__pdf--clickable:focus-visible {
+  outline: none;
+}
+
 .brain-node__pdf .react-pdf__Document {
   display: flex;
   justify-content: center;

@@ -19,6 +19,24 @@ function PdfNode({ id, data, selected }: NodeProps<PdfCanvasNode>) {
     updatePdfNode(id, { summary: nextValue }),
   )
 
+  function openPdfPreview() {
+    if (!file) {
+      return
+    }
+
+    const url = URL.createObjectURL(file)
+    const link = document.createElement('a')
+
+    link.href = url
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+    link.click()
+
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url)
+    }, 60_000)
+  }
+
   return (
     <article
       className={`brain-node brain-node--pdf${selected ? ' is-selected' : ''}${isCollapsed ? ' brain-node--collapsed' : ''}`}
@@ -48,7 +66,7 @@ function PdfNode({ id, data, selected }: NodeProps<PdfCanvasNode>) {
       </div>
 
       <input
-        className="brain-node__title nodrag"
+        className="brain-node__title nodrag nowheel"
         value={titleField.value}
         placeholder="PDF 标题"
         onChange={titleField.onChange}
@@ -59,7 +77,24 @@ function PdfNode({ id, data, selected }: NodeProps<PdfCanvasNode>) {
 
       {isCollapsed ? null : (
         <>
-          <div className="brain-node__pdf nodrag">
+          <div
+            className={`brain-node__pdf nodrag${file ? ' brain-node__pdf--clickable' : ''}`}
+            role={file ? 'button' : undefined}
+            tabIndex={file ? 0 : undefined}
+            title={file ? '点击在新页面打开 PDF' : undefined}
+            aria-label={file ? '在新页面打开 PDF' : undefined}
+            onClick={file ? openPdfPreview : undefined}
+            onKeyDown={
+              file
+                ? (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      openPdfPreview()
+                    }
+                  }
+                : undefined
+            }
+          >
             {file ? (
               <Document
                 file={file}
@@ -79,7 +114,7 @@ function PdfNode({ id, data, selected }: NodeProps<PdfCanvasNode>) {
           </div>
 
           <textarea
-            className="brain-node__body brain-node__body--compact nodrag"
+            className="brain-node__body brain-node__body--compact nodrag nowheel"
             value={summaryField.value}
             placeholder="在这里写摘要、启发、争议点和后续行动。"
             onChange={summaryField.onChange}

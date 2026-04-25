@@ -1,5 +1,7 @@
 import {
   addEdge,
+  applyEdgeChanges,
+  applyNodeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -11,10 +13,12 @@ import {
   useNodesState,
   useReactFlow,
   type Connection,
+  type EdgeChange,
   type Edge,
+  type NodeChange,
   type XYPosition,
 } from '@xyflow/react'
-import { startTransition, useEffect, useRef, useState } from 'react'
+import { startTransition, useEffect, useEffectEvent, useRef, useState } from 'react'
 
 import '@xyflow/react/dist/style.css'
 
@@ -22,7 +26,6 @@ import { CanvasContext } from './canvas-context'
 import NoteNode from './nodes/NoteNode'
 import PdfNode from './nodes/PdfNode'
 import {
-  clearWorkspaceStorage,
   createExportBundle,
   loadPdfFiles,
   loadSnapshot,
@@ -123,6 +126,16 @@ type NavTreeItemProps = {
   onFocus: (id: string) => void
 }
 
+type CanvasHistoryState = {
+  nodes: MindNode[]
+  edges: MindEdge[]
+  pdfFiles: Record<string, Blob>
+}
+
+type LayoutMode = 'horizontal' | 'vertical'
+
+const MAX_HISTORY_ENTRIES = 60
+
 function App() {
   return (
     <ReactFlowProvider>
@@ -180,14 +193,90 @@ function MindCanvas() {
   const reactFlow = useReactFlow<MindNode, MindEdge>()
   const importRef = useRef<HTMLInputElement>(null)
   const pdfInputRef = useRef<HTMLInputElement>(null)
-  const [nodes, setNodes, onNodesChange] = useNodesState<MindNode>([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState<MindEdge>([])
+  const [nodes, setNodes] = useNodesState<MindNode>([])
+  const [edges, setEdges] = useEdgesState<MindEdge>([])
   const [pdfFiles, setPdfFiles] = useState<Record<string, Blob>>({})
   const [isReady, setIsReady] = useState(false)
   const [isControlPanelOpen, setIsControlPanelOpen] = useState(true)
   const [isHintPanelOpen, setIsHintPanelOpen] = useState(true)
   const [isNavOpen, setIsNavOpen] = useState(true)
   const [collapsedNavIds, setCollapsedNavIds] = useState<Record<string, boolean>>({})
+  const canvasStateRef = useRef<CanvasHistoryState>({ nodes: [], edges: [], pdfFiles: {} })
+  const undoStackRef = useRef<CanvasHistoryState[]>([])
+  const redoStackRef = useRef<CanvasHistoryState[]>([])
+  const pdfStoreSyncQueueRef = useRef(Promise.resolve())
+
+  function queuePdfStoreSync(previousPdfFiles: Record<string, Blob>, nextPdfFiles: Record<string, Blob>) {
+    pdfStoreSyncQueueRef.current = pdfStoreSyncQueueRef.current
+      .catch(() => undefined)
+      .then(() => syncPdfFileStore(previousPdfFiles, nextPdfFiles))
+  }
+
+  function applyCanvasState(
+    nextState: CanvasHistoryState,
+    options: { recordHistory?: boolean } = {},
+  ) {
+    const currentState = canvasStateRef.current
+
+    if (
+      nextState.nodes === currentState.nodes &&
+      nextState.edges === currentState.edges &&
+      nextState.pdfFiles === currentState.pdfFiles
+    ) {
+      return false
+    }
+
+    if (options.recordHistory ?? true) {
+      undoStackRef.current = pushHistoryEntry(undoStackRef.current, currentState)
+      redoStackRef.current = []
+    }
+
+    const normalizedState = cloneCanvasHistoryState(nextState)
+    canvasStateRef.current = normalizedState
+    setNodes(normalizedState.nodes)
+    setEdges(normalizedState.edges)
+    setPdfFiles(normalizedState.pdfFiles)
+    queuePdfStoreSync(currentState.pdfFiles, normalizedState.pdfFiles)
+
+    return true
+  }
+
+  const restoreCanvasState = useEffectEvent((historyState: CanvasHistoryState) => {
+    const currentState = canvasStateRef.current
+    const normalizedState = cloneCanvasHistoryState(historyState)
+
+    canvasStateRef.current = normalizedState
+    setNodes(normalizedState.nodes)
+    setEdges(normalizedState.edges)
+    setPdfFiles(normalizedState.pdfFiles)
+    queuePdfStoreSync(currentState.pdfFiles, normalizedState.pdfFiles)
+  })
+
+  const undo = useEffectEvent(() => {
+    const previousState = undoStackRef.current.pop()
+
+    if (!previousState) {
+      return
+    }
+
+    redoStackRef.current = pushHistoryEntry(redoStackRef.current, canvasStateRef.current)
+    restoreCanvasState(previousState)
+  })
+
+  const redo = useEffectEvent(() => {
+    const nextState = redoStackRef.current.pop()
+
+    if (!nextState) {
+      return
+    }
+
+    undoStackRef.current = pushHistoryEntry(undoStackRef.current, canvasStateRef.current)
+    restoreCanvasState(nextState)
+  })
+
+  useEffect(() => {
+    canvasStateRef.current = { nodes, edges, pdfFiles }
+  }, [edges, nodes, pdfFiles])
 
   useEffect(() => {
     let cancelled = false
@@ -197,9 +286,20 @@ function MindCanvas() {
 
       if (!snapshot) {
         if (!cancelled) {
+          const initialState = cloneCanvasHistoryState({
+            nodes: starterSnapshot.nodes,
+            edges: starterSnapshot.edges,
+            pdfFiles: {},
+          })
+
+          undoStackRef.current = []
+          redoStackRef.current = []
+          canvasStateRef.current = initialState
+
           startTransition(() => {
-            setNodes(starterSnapshot.nodes)
-            setEdges(starterSnapshot.edges)
+            setNodes(initialState.nodes)
+            setEdges(initialState.edges)
+            setPdfFiles(initialState.pdfFiles)
             setIsReady(true)
           })
         }
@@ -221,10 +321,20 @@ function MindCanvas() {
         return
       }
 
+      const initialState = cloneCanvasHistoryState({
+        nodes: snapshot.nodes,
+        edges: snapshot.edges,
+        pdfFiles: restoredPdfFiles,
+      })
+
+      undoStackRef.current = []
+      redoStackRef.current = []
+      canvasStateRef.current = initialState
+
       startTransition(() => {
-        setNodes(snapshot.nodes)
-        setEdges(snapshot.edges)
-        setPdfFiles(restoredPdfFiles)
+        setNodes(initialState.nodes)
+        setEdges(initialState.edges)
+        setPdfFiles(initialState.pdfFiles)
         setIsReady(true)
       })
     })()
@@ -248,6 +358,84 @@ function MindCanvas() {
     }
   }, [edges, isReady, nodes])
 
+  useEffect(() => {
+    if (!isReady) {
+      return
+    }
+
+    function onWindowKeyDown(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || isEditableTarget(event.target)) {
+        return
+      }
+
+      const key = event.key.toLowerCase()
+      const wantsUndo = key === 'z' && !event.shiftKey
+      const wantsRedo = key === 'y' || (key === 'z' && event.shiftKey)
+
+      if (!wantsUndo && !wantsRedo) {
+        return
+      }
+
+      event.preventDefault()
+
+      if (wantsUndo) {
+        undo()
+        return
+      }
+
+      redo()
+    }
+
+    window.addEventListener('keydown', onWindowKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', onWindowKeyDown)
+    }
+  }, [isReady])
+
+  function onNodesChange(changes: NodeChange<MindNode>[]) {
+    if (!changes.length) {
+      return
+    }
+
+    const currentState = canvasStateRef.current
+    const removedNodeIds = new Set(
+      changes.filter((change) => change.type === 'remove').map((change) => change.id),
+    )
+
+    applyCanvasState(
+      {
+        nodes: applyNodeChanges(changes, currentState.nodes),
+        edges: removedNodeIds.size
+          ? currentState.edges.filter(
+              (edge) => !removedNodeIds.has(edge.source) && !removedNodeIds.has(edge.target),
+            )
+          : currentState.edges,
+        pdfFiles: removedNodeIds.size
+          ? dropPdfFilesForRemovedNodes(currentState.nodes, currentState.pdfFiles, removedNodeIds)
+          : currentState.pdfFiles,
+      },
+      { recordHistory: shouldTrackNodeChanges(changes) },
+    )
+  }
+
+  function onEdgesChange(changes: EdgeChange<MindEdge>[]) {
+    if (!changes.length) {
+      return
+    }
+
+    const currentState = canvasStateRef.current
+
+    applyCanvasState(
+      {
+        nodes: currentState.nodes,
+        edges: applyEdgeChanges(changes, currentState.edges),
+        pdfFiles: currentState.pdfFiles,
+      },
+      { recordHistory: shouldTrackEdgeChanges(changes) },
+    )
+  }
+
   function getViewportSpawn(offset = 0): XYPosition {
     return reactFlow.screenToFlowPosition({
       x: window.innerWidth / 2 + offset * 28,
@@ -256,11 +444,17 @@ function MindCanvas() {
   }
 
   function addNote() {
-    const node = createNoteNode(getViewportSpawn(nodes.length % 4))
-    setNodes((current) => current.concat(node))
+    const currentState = canvasStateRef.current
+    const node = createNoteNode(getViewportSpawn(currentState.nodes.length % 4))
+
+    applyCanvasState({
+      nodes: currentState.nodes.concat(node),
+      edges: currentState.edges,
+      pdfFiles: currentState.pdfFiles,
+    })
   }
 
-  async function addPdfFiles(files: File[], anchor?: XYPosition) {
+  function addPdfFiles(files: File[], anchor?: XYPosition) {
     const incomingFiles = files.filter(
       (file) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'),
     )
@@ -269,6 +463,7 @@ function MindCanvas() {
       return
     }
 
+    const currentState = canvasStateRef.current
     const nextPdfFiles: Record<string, Blob> = {}
     const nextNodes = incomingFiles.map((file, index) => {
       const fileId = createId('pdf')
@@ -286,17 +481,21 @@ function MindCanvas() {
       )
     })
 
-    await Promise.all(
-      Object.entries(nextPdfFiles).map(([fileId, file]) => savePdfFile(fileId, file)),
-    )
-
-    setPdfFiles((current) => ({ ...current, ...nextPdfFiles }))
-    setNodes((current) => current.concat(nextNodes))
+    applyCanvasState({
+      nodes: currentState.nodes.concat(nextNodes),
+      edges: currentState.edges,
+      pdfFiles: {
+        ...currentState.pdfFiles,
+        ...nextPdfFiles,
+      },
+    })
   }
 
   function updateNoteNode(id: string, patch: Partial<NoteNodeData>) {
-    setNodes((current) =>
-      current.map((node) => {
+    const currentState = canvasStateRef.current
+
+    applyCanvasState({
+      nodes: currentState.nodes.map((node) => {
         if (node.id !== id || node.type !== 'note' || node.data.kind !== 'note') {
           return node
         }
@@ -309,12 +508,16 @@ function MindCanvas() {
           },
         }
       }),
-    )
+      edges: currentState.edges,
+      pdfFiles: currentState.pdfFiles,
+    })
   }
 
   function updatePdfNode(id: string, patch: Partial<PdfNodeData>) {
-    setNodes((current) =>
-      current.map((node) => {
+    const currentState = canvasStateRef.current
+
+    applyCanvasState({
+      nodes: currentState.nodes.map((node) => {
         if (node.id !== id || node.type !== 'pdf' || node.data.kind !== 'pdf') {
           return node
         }
@@ -327,7 +530,9 @@ function MindCanvas() {
           },
         }
       }),
-    )
+      edges: currentState.edges,
+      pdfFiles: currentState.pdfFiles,
+    })
   }
 
   function getPdfFile(fileId: string) {
@@ -335,33 +540,21 @@ function MindCanvas() {
   }
 
   function removeNode(nodeId: string) {
-    let removedFileId: string | null = null
+    const currentState = canvasStateRef.current
+    const removedNodeIds = new Set([nodeId])
+    const nextNodes = currentState.nodes.filter((node) => node.id !== nodeId)
 
-    setNodes((current) =>
-      current.filter((node) => {
-        if (node.id === nodeId && node.type === 'pdf' && node.data.kind === 'pdf') {
-          removedFileId = node.data.fileId
-        }
-
-        return node.id !== nodeId
-      }),
-    )
-
-    setEdges((current) =>
-      current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
-    )
-
-    if (!removedFileId) {
+    if (nextNodes.length === currentState.nodes.length) {
       return
     }
 
-    setPdfFiles((current) => {
-      const next = { ...current }
-      delete next[removedFileId!]
-      return next
+    applyCanvasState({
+      nodes: nextNodes,
+      edges: currentState.edges.filter(
+        (edge) => edge.source !== nodeId && edge.target !== nodeId,
+      ),
+      pdfFiles: dropPdfFilesForRemovedNodes(currentState.nodes, currentState.pdfFiles, removedNodeIds),
     })
-
-    void removePdfFile(removedFileId)
   }
 
   function onConnect(connection: Connection) {
@@ -369,11 +562,15 @@ function MindCanvas() {
       return
     }
 
-    setEdges((current) =>
-      hasRelation(current, connection.source!, connection.target!)
-        ? current
-        : addEdge(createMindEdge(connection.source!, connection.target!), current),
-    )
+    const currentState = canvasStateRef.current
+
+    applyCanvasState({
+      nodes: currentState.nodes,
+      edges: hasRelation(currentState.edges, connection.source!, connection.target!)
+        ? currentState.edges
+        : addEdge(createMindEdge(connection.source!, connection.target!), currentState.edges),
+      pdfFiles: currentState.pdfFiles,
+    })
   }
 
   function focusNode(nodeId: string) {
@@ -396,6 +593,20 @@ function MindCanvas() {
     void reactFlow.fitView({ duration: 280, padding: 0.18 })
   }
 
+  function arrangeHierarchy(mode: LayoutMode) {
+    const currentState = canvasStateRef.current
+
+    applyCanvasState({
+      nodes: arrangeNodesByHierarchy(currentState.nodes, currentState.edges, mode),
+      edges: currentState.edges,
+      pdfFiles: currentState.pdfFiles,
+    })
+
+    window.setTimeout(() => {
+      void reactFlow.fitView({ duration: 280, padding: 0.2 })
+    }, 0)
+  }
+
   function toggleNavBranch(nodeId: string) {
     setCollapsedNavIds((current) => ({
       ...current,
@@ -405,7 +616,7 @@ function MindCanvas() {
 
   function onPdfInputChange(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? [])
-    void addPdfFiles(files)
+    addPdfFiles(files)
     event.target.value = ''
   }
 
@@ -418,7 +629,7 @@ function MindCanvas() {
     event.preventDefault()
     const droppedFiles = Array.from(event.dataTransfer.files)
 
-    void addPdfFiles(
+    addPdfFiles(
       droppedFiles,
       reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY }),
     )
@@ -456,15 +667,10 @@ function MindCanvas() {
 
       const restoredPdfFiles = await restorePdfFiles(parsed)
 
-      await Promise.all(
-        Object.entries(restoredPdfFiles).map(([fileId, blob]) => savePdfFile(fileId, blob)),
-      )
-      await saveSnapshot(parsed.snapshot)
-
-      startTransition(() => {
-        setNodes(parsed.snapshot.nodes)
-        setEdges(parsed.snapshot.edges)
-        setPdfFiles(restoredPdfFiles)
+      applyCanvasState({
+        nodes: parsed.snapshot.nodes,
+        edges: parsed.snapshot.edges,
+        pdfFiles: restoredPdfFiles,
       })
     })().catch((error) => {
       console.error(error)
@@ -481,12 +687,10 @@ function MindCanvas() {
       return
     }
 
-    await clearWorkspaceStorage()
-
-    startTransition(() => {
-      setNodes(starterSnapshot.nodes)
-      setEdges(starterSnapshot.edges)
-      setPdfFiles({})
+    applyCanvasState({
+      nodes: starterSnapshot.nodes,
+      edges: starterSnapshot.edges,
+      pdfFiles: {},
     })
   }
 
@@ -528,6 +732,7 @@ function MindCanvas() {
           onConnect={onConnect}
           defaultEdgeOptions={defaultEdgeOptions as Edge}
           nodeTypes={nodeTypes}
+          noWheelClassName="nowheel"
           fitView
           minZoom={0.15}
           maxZoom={1.8}
@@ -571,6 +776,20 @@ function MindCanvas() {
                     </button>
                     <button type="button" className="secondary" onClick={() => pdfInputRef.current?.click()}>
                       导入 PDF
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => arrangeHierarchy('horizontal')}
+                    >
+                      横向整理
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => arrangeHierarchy('vertical')}
+                    >
+                      纵向整理
                     </button>
                     <button type="button" className="secondary" onClick={exportWorkspace}>
                       导出脑图
@@ -664,6 +883,91 @@ function MindCanvas() {
       </div>
     </CanvasContext.Provider>
   )
+}
+
+function cloneCanvasHistoryState(state: CanvasHistoryState): CanvasHistoryState {
+  return {
+    nodes: state.nodes.map((node) => structuredClone(node)),
+    edges: state.edges.map((edge) => structuredClone(edge)),
+    pdfFiles: { ...state.pdfFiles },
+  }
+}
+
+function pushHistoryEntry(historyStack: CanvasHistoryState[], historyState: CanvasHistoryState) {
+  const nextStack = historyStack.concat(cloneCanvasHistoryState(historyState))
+
+  if (nextStack.length > MAX_HISTORY_ENTRIES) {
+    nextStack.shift()
+  }
+
+  return nextStack
+}
+
+function shouldTrackNodeChanges(changes: NodeChange<MindNode>[]) {
+  return changes.some((change) => {
+    if (change.type === 'position') {
+      return change.dragging === false
+    }
+
+    return change.type === 'add' || change.type === 'remove' || change.type === 'replace'
+  })
+}
+
+function shouldTrackEdgeChanges(changes: EdgeChange<MindEdge>[]) {
+  return changes.some((change) => change.type !== 'select')
+}
+
+function dropPdfFilesForRemovedNodes(
+  nodes: MindNode[],
+  pdfFiles: Record<string, Blob>,
+  removedNodeIds: Set<string>,
+) {
+  const removedFileIds = nodes
+    .filter(
+      (node): node is Extract<MindNode, { type: 'pdf' }> =>
+        removedNodeIds.has(node.id) && node.type === 'pdf' && node.data.kind === 'pdf',
+    )
+    .map((node) => node.data.fileId)
+
+  if (!removedFileIds.length) {
+    return pdfFiles
+  }
+
+  const nextPdfFiles = { ...pdfFiles }
+
+  for (const fileId of removedFileIds) {
+    delete nextPdfFiles[fileId]
+  }
+
+  return nextPdfFiles
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.tagName === 'SELECT')
+  )
+}
+
+async function syncPdfFileStore(
+  previousPdfFiles: Record<string, Blob>,
+  nextPdfFiles: Record<string, Blob>,
+) {
+  const writeTasks = Object.entries(nextPdfFiles)
+    .filter(([fileId, file]) => previousPdfFiles[fileId] !== file)
+    .map(([fileId, file]) => savePdfFile(fileId, file))
+  const removeTasks = Object.keys(previousPdfFiles)
+    .filter((fileId) => !(fileId in nextPdfFiles))
+    .map((fileId) => removePdfFile(fileId))
+
+  if (!writeTasks.length && !removeTasks.length) {
+    return
+  }
+
+  await Promise.all([...writeTasks, ...removeTasks])
 }
 
 function createNoteNode(position: XYPosition): MindNode {
@@ -791,6 +1095,336 @@ function buildNavigationTree(nodes: MindNode[], edges: MindEdge[]): NavTreeNode[
   }
 
   return tree
+}
+
+function arrangeNodesByHierarchy(nodes: MindNode[], edges: MindEdge[], mode: LayoutMode) {
+  if (nodes.length < 2) {
+    return nodes
+  }
+
+  const nodesById = new Map(nodes.map((node) => [node.id, node]))
+  const validEdges = edges.filter(
+    (edge) => nodesById.has(edge.source) && nodesById.has(edge.target) && edge.source !== edge.target,
+  )
+
+  if (!validEdges.length) {
+    return arrangeNodesWithoutEdges(nodes, mode)
+  }
+
+  const config = getLayoutConfig(mode)
+
+  const incomingCounts = new Map<string, number>()
+  const pendingIncomingCounts = new Map<string, number>()
+  const childrenById = new Map<string, string[]>()
+  const parentsById = new Map<string, string[]>()
+
+  for (const node of nodes) {
+    incomingCounts.set(node.id, 0)
+    pendingIncomingCounts.set(node.id, 0)
+    childrenById.set(node.id, [])
+    parentsById.set(node.id, [])
+  }
+
+  for (const edge of validEdges) {
+    childrenById.get(edge.source)!.push(edge.target)
+    parentsById.get(edge.target)!.push(edge.source)
+    incomingCounts.set(edge.target, (incomingCounts.get(edge.target) ?? 0) + 1)
+    pendingIncomingCounts.set(edge.target, (pendingIncomingCounts.get(edge.target) ?? 0) + 1)
+  }
+
+  const sortNodeIds = (ids: string[]) =>
+    [...new Set(ids)].sort((leftId, rightId) => {
+      const leftNode = nodesById.get(leftId)
+      const rightNode = nodesById.get(rightId)
+
+      if (!leftNode || !rightNode) {
+        return 0
+      }
+
+      return compareNodesForLayout(leftNode, rightNode, mode)
+    })
+
+  const roots = sortNodeIds(
+    nodes.map((node) => node.id).filter((nodeId) => (incomingCounts.get(nodeId) ?? 0) === 0),
+  )
+  const queue = roots.length ? [...roots] : sortNodeIds(nodes.map((node) => node.id))
+  const depthById = new Map<string, number>()
+  const visited = new Set<string>()
+
+  for (const rootId of queue) {
+    depthById.set(rootId, depthById.get(rootId) ?? 0)
+  }
+
+  while (queue.length) {
+    const nodeId = queue.shift()!
+    const currentDepth = depthById.get(nodeId) ?? 0
+
+    if (visited.has(nodeId)) {
+      continue
+    }
+
+    visited.add(nodeId)
+
+    for (const childId of sortNodeIds(childrenById.get(nodeId) ?? [])) {
+      depthById.set(childId, Math.max(depthById.get(childId) ?? 0, currentDepth + 1))
+      pendingIncomingCounts.set(childId, Math.max((pendingIncomingCounts.get(childId) ?? 1) - 1, 0))
+
+      if ((pendingIncomingCounts.get(childId) ?? 0) === 0) {
+        queue.push(childId)
+      }
+    }
+  }
+
+  for (const nodeId of sortNodeIds(nodes.map((node) => node.id))) {
+    if (depthById.has(nodeId)) {
+      continue
+    }
+
+    const parentDepth = Math.max(
+      -1,
+      ...(parentsById.get(nodeId) ?? []).map((parentId) => depthById.get(parentId) ?? -1),
+    )
+
+    depthById.set(nodeId, parentDepth + 1)
+  }
+
+  const levels = new Map<number, string[]>()
+
+  for (const node of nodes) {
+    const depth = depthById.get(node.id) ?? 0
+    const peers = levels.get(depth) ?? []
+    peers.push(node.id)
+    levels.set(depth, peers)
+  }
+
+  const orderedDepths = [...levels.keys()].sort((left, right) => left - right)
+  const bounds = getNodePositionBounds(nodes)
+  const preparedLevels = orderedDepths.map((depth) => {
+    const ids = sortLevelNodeIds(levels.get(depth) ?? [], nodesById, parentsById, mode)
+    const frames = ids.map((nodeId) => estimateNodeFrame(nodesById.get(nodeId)!))
+    const mainSpan = Math.max(...frames.map((frame) => frame[config.mainSize]), 0)
+    const crossSpans = frames.map((frame) => frame[config.crossSize])
+    const totalCrossSpan =
+      crossSpans.reduce((sum, span) => sum + span, 0) +
+      config.itemGap * Math.max(crossSpans.length - 1, 0)
+
+    return {
+      ids,
+      frames,
+      mainSpan,
+      crossSpans,
+      totalCrossSpan,
+    }
+  })
+  const totalMainSpan =
+    preparedLevels.reduce((sum, level) => sum + level.mainSpan, 0) +
+    config.levelGap * Math.max(preparedLevels.length - 1, 0)
+  let mainCursor = getLayoutAxisCenter(bounds, mode) - totalMainSpan / 2
+  const nextPositions = new Map<string, { x: number; y: number }>()
+
+  for (const level of preparedLevels) {
+    let crossCursor = getCrossAxisCenter(bounds, mode) - level.totalCrossSpan / 2
+
+    level.ids.forEach((nodeId, index) => {
+      const node = nodesById.get(nodeId)
+      const frame = level.frames[index]
+
+      if (!node || !frame) {
+        return
+      }
+
+      const mainOffset = (level.mainSpan - frame[config.mainSize]) / 2
+
+      nextPositions.set(nodeId, {
+        x: mode === 'horizontal' ? mainCursor + mainOffset : crossCursor,
+        y: mode === 'horizontal' ? crossCursor : mainCursor + mainOffset,
+      })
+
+      crossCursor += level.crossSpans[index] + config.itemGap
+    })
+
+    mainCursor += level.mainSpan + config.levelGap
+  }
+
+  return nodes.map((node) => ({
+    ...node,
+    position: nextPositions.get(node.id) ?? node.position,
+  }))
+}
+
+function sortLevelNodeIds(
+  ids: string[],
+  nodesById: Map<string, MindNode>,
+  parentsById: Map<string, string[]>,
+  mode: LayoutMode,
+) {
+  return [...new Set(ids)].sort((leftId, rightId) => {
+    const leftNode = nodesById.get(leftId)
+    const rightNode = nodesById.get(rightId)
+
+    if (!leftNode || !rightNode) {
+      return 0
+    }
+
+    const leftAnchor = getParentAnchor(leftId, nodesById, parentsById, mode)
+    const rightAnchor = getParentAnchor(rightId, nodesById, parentsById, mode)
+
+    if (leftAnchor !== rightAnchor) {
+      return leftAnchor - rightAnchor
+    }
+
+    return compareNodesForLayout(leftNode, rightNode, mode)
+  })
+}
+
+function getParentAnchor(
+  nodeId: string,
+  nodesById: Map<string, MindNode>,
+  parentsById: Map<string, string[]>,
+  mode: LayoutMode,
+) {
+  const anchorKey = mode === 'horizontal' ? 'y' : 'x'
+  const parents = parentsById.get(nodeId) ?? []
+
+  if (!parents.length) {
+    return nodesById.get(nodeId)?.position[anchorKey] ?? 0
+  }
+
+  const anchors = parents
+    .map((parentId) => nodesById.get(parentId)?.position[anchorKey])
+    .filter((anchor): anchor is number => typeof anchor === 'number')
+
+  if (!anchors.length) {
+    return nodesById.get(nodeId)?.position[anchorKey] ?? 0
+  }
+
+  return anchors.reduce((sum, anchor) => sum + anchor, 0) / anchors.length
+}
+
+function arrangeNodesWithoutEdges(nodes: MindNode[], mode: LayoutMode) {
+  const config = getLayoutConfig(mode)
+  const orderedNodes = [...nodes].sort((left, right) => compareNodesForLayout(left, right, mode))
+  const bounds = getNodePositionBounds(nodes)
+  const groupCount = Math.max(1, Math.ceil(Math.sqrt(nodes.length)))
+  const groups = Array.from({ length: groupCount }, () => [] as MindNode[])
+
+  orderedNodes.forEach((node, index) => {
+    groups[index % groupCount].push(node)
+  })
+
+  const preparedGroups = groups.map((group) => {
+    const frames = group.map((node) => estimateNodeFrame(node))
+    const mainSpan = Math.max(...frames.map((frame) => frame[config.mainSize]), 0)
+    const crossSpans = frames.map((frame) => frame[config.crossSize])
+    const totalCrossSpan =
+      crossSpans.reduce((sum, span) => sum + span, 0) +
+      config.itemGap * Math.max(crossSpans.length - 1, 0)
+
+    return {
+      group,
+      frames,
+      mainSpan,
+      crossSpans,
+      totalCrossSpan,
+    }
+  })
+  const totalMainSpan =
+    preparedGroups.reduce((sum, group) => sum + group.mainSpan, 0) +
+    config.levelGap * Math.max(preparedGroups.length - 1, 0)
+  let mainCursor = getLayoutAxisCenter(bounds, mode) - totalMainSpan / 2
+
+  const nextPositions = new Map<string, { x: number; y: number }>()
+
+  preparedGroups.forEach((group) => {
+    let crossCursor = getCrossAxisCenter(bounds, mode) - group.totalCrossSpan / 2
+
+    group.group.forEach((node, index) => {
+      const frame = group.frames[index]
+
+      if (!frame) {
+        return
+      }
+
+      const mainOffset = (group.mainSpan - frame[config.mainSize]) / 2
+
+      nextPositions.set(node.id, {
+        x: mode === 'horizontal' ? mainCursor + mainOffset : crossCursor,
+        y: mode === 'horizontal' ? crossCursor : mainCursor + mainOffset,
+      })
+
+      crossCursor += group.crossSpans[index] + config.itemGap
+    })
+
+    mainCursor += group.mainSpan + config.levelGap
+  })
+
+  return nodes.map((node) => ({
+    ...node,
+    position: nextPositions.get(node.id) ?? node.position,
+  }))
+}
+
+function getLayoutConfig(mode: LayoutMode) {
+  if (mode === 'vertical') {
+    return {
+      mainSize: 'height' as const,
+      crossSize: 'width' as const,
+      levelGap: 76,
+      itemGap: 30,
+    }
+  }
+
+  return {
+    mainSize: 'width' as const,
+    crossSize: 'height' as const,
+    levelGap: 80,
+    itemGap: 30,
+  }
+}
+
+function getLayoutAxisCenter(bounds: ReturnType<typeof getNodePositionBounds>, mode: LayoutMode) {
+  return mode === 'horizontal' ? bounds.centerX : bounds.centerY
+}
+
+function getCrossAxisCenter(bounds: ReturnType<typeof getNodePositionBounds>, mode: LayoutMode) {
+  return mode === 'horizontal' ? bounds.centerY : bounds.centerX
+}
+
+function compareNodesForLayout(left: MindNode, right: MindNode, mode: LayoutMode) {
+  if (mode === 'vertical') {
+    if (left.position.x !== right.position.x) {
+      return left.position.x - right.position.x
+    }
+
+    if (left.position.y !== right.position.y) {
+      return left.position.y - right.position.y
+    }
+
+    return getNodeLabel(left).localeCompare(getNodeLabel(right), 'zh-CN')
+  }
+
+  return compareNodesForNavigation(left, right)
+}
+
+function estimateNodeFrame(node: MindNode) {
+  return {
+    width: node.type === 'pdf' ? 340 : 320,
+    height: node.data.collapsed ? 108 : node.type === 'pdf' ? 440 : 280,
+  }
+}
+
+function getNodePositionBounds(nodes: MindNode[]) {
+  const xs = nodes.map((node) => node.position.x)
+  const ys = nodes.map((node) => node.position.y)
+  const minX = Math.min(...xs)
+  const maxX = Math.max(...xs)
+  const minY = Math.min(...ys)
+  const maxY = Math.max(...ys)
+
+  return {
+    centerX: (minX + maxX) / 2,
+    centerY: (minY + maxY) / 2,
+  }
 }
 
 function compareNodesForNavigation(left: MindNode, right: MindNode) {

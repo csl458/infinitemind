@@ -41,7 +41,7 @@ function NoteNode({ id, data, selected }: NodeProps<NoteCanvasNode>) {
       </div>
 
       <input
-        className="brain-node__title nodrag"
+        className="brain-node__title nodrag nowheel"
         value={titleField.value}
         placeholder="节点标题"
         onChange={titleField.onChange}
@@ -52,7 +52,7 @@ function NoteNode({ id, data, selected }: NodeProps<NoteCanvasNode>) {
 
       {isCollapsed ? null : (
         <textarea
-          className="brain-node__body nodrag"
+          className="brain-node__body nodrag nowheel"
           value={contentField.value}
           placeholder="写下你的理解、推导、反驳点或下一步实验。"
           onChange={contentField.onChange}
